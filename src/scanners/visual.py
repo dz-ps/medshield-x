@@ -40,6 +40,7 @@ class VisualPhishingScanner:
         self.screenshots_dir = Path(screenshots_dir)
         self.logo_template: Optional[np.ndarray] = None
         self.browser: Optional[Browser] = None
+        self.playwright = None
         self._load_logo_template()
         self._ensure_screenshots_dir()
     
@@ -69,8 +70,9 @@ class VisualPhishingScanner:
     async def _init_browser(self):
         """Initialize Playwright browser"""
         if self.browser is None:
-            playwright = await async_playwright().start()
-            self.browser = await playwright.chromium.launch(
+            if self.playwright is None:
+                self.playwright = await async_playwright().start()
+            self.browser = await self.playwright.chromium.launch(
                 headless=True,
                 args=['--no-sandbox', '--disable-setuid-sandbox']
             )
@@ -80,6 +82,9 @@ class VisualPhishingScanner:
         if self.browser:
             await self.browser.close()
             self.browser = None
+        if self.playwright:
+            await self.playwright.stop()
+            self.playwright = None
     
     def _get_domain_filename(self, url: str) -> str:
         """Generate safe filename from domain"""
@@ -89,22 +94,27 @@ class VisualPhishingScanner:
         safe_name = re.sub(r'[^\w\-_\.]', '_', domain)
         return f"{safe_name}.png"
     
-    async def _capture_screenshot(self, url: str, timeout: int = 30000, save: bool = True) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    async def _capture_screenshot(self, url: str, page: Optional[Page] = None, timeout: int = 30000, save: bool = True) -> Tuple[Optional[np.ndarray], Optional[str], Optional[Page]]:
         """
         Capture screenshot of webpage using Playwright and optionally save it
         
         Args:
             url: URL to capture
+            page: Optional existing page object (if None, creates new)
             timeout: Timeout in milliseconds
             save: Whether to save screenshot to disk
             
         Returns:
-            Tuple of (screenshot as numpy array, screenshot_path or None)
+            Tuple of (screenshot as numpy array, screenshot_path or None, page object)
         """
         screenshot_path = None
+        page_created = False
+        
         try:
-            await self._init_browser()
-            page = await self.browser.new_page()
+            if page is None:
+                await self._init_browser()
+                page = await self.browser.new_page()
+                page_created = True
             
             # Set viewport size
             await page.set_viewport_size({"width": 1920, "height": 1080})
@@ -128,57 +138,118 @@ class VisualPhishingScanner:
                 except Exception as e:
                     logger.error(f"Error saving screenshot: {e}")
             
-            await page.close()
-            
             # Convert to numpy array
             img_array = np.frombuffer(screenshot_bytes, np.uint8)
             img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             
-            return img, str(screenshot_path) if screenshot_path else None
+            return img, str(screenshot_path) if screenshot_path else None, page
             
         except Exception as e:
             logger.error(f"Error capturing screenshot for {url}: {e}")
-            return None, None
+            if page_created and page:
+                await page.close()
+            return None, None, None
     
-    async def _extract_html_content(self, url: str) -> str:
+    async def _detect_login_form_playwright(self, page: Page) -> bool:
+        """
+        Detect login forms using Playwright locators (detects dynamic forms)
+        
+        Args:
+            page: Playwright page object
+            
+        Returns:
+            True if login form is detected
+        """
+        try:
+            # Check for password input fields using Playwright locator
+            password_count = await page.locator('input[type="password"]').count()
+            
+            if password_count > 0:
+                # Found password field, now check for login-related attributes
+                login_keywords = ['user', 'login', 'senha', 'cpf', 'email', 'username', 'usuario', 'password']
+                
+                # Check input fields with login-related names/ids/placeholders
+                for keyword in login_keywords:
+                    # Check by name attribute
+                    name_count = await page.locator(f'input[name*="{keyword}" i]').count()
+                    # Check by id attribute
+                    id_count = await page.locator(f'input[id*="{keyword}" i]').count()
+                    # Check by placeholder attribute
+                    placeholder_count = await page.locator(f'input[placeholder*="{keyword}" i]').count()
+                    
+                    if name_count > 0 or id_count > 0 or placeholder_count > 0:
+                        logger.info(f"Login form detected: password field with login attribute '{keyword}'")
+                        return True
+                
+                # Check form elements with login-related attributes
+                for keyword in login_keywords:
+                    form_count = await page.locator(f'form[id*="{keyword}" i], form[name*="{keyword}" i], form[class*="{keyword}" i]').count()
+                    if form_count > 0:
+                        logger.info(f"Login form detected: form with login attribute '{keyword}'")
+                        return True
+                
+                # If password field exists, it's likely a login form
+                logger.info("Login form detected: password input field found")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error detecting login form with Playwright: {e}")
+            return False
+    
+    async def _extract_html_content(self, url: str, page: Optional[Page] = None) -> Tuple[str, Optional[Page]]:
         """
         Extract HTML content from page
         
         Args:
             url: URL to extract HTML from
+            page: Optional existing page object
             
         Returns:
-            HTML content
+            Tuple of (HTML content, page object)
         """
+        page_created = False
         try:
-            await self._init_browser()
-            page = await self.browser.new_page()
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            if page is None:
+                await self._init_browser()
+                page = await self.browser.new_page()
+                page_created = True
+                await page.goto(url, wait_until="networkidle", timeout=30000)
             
             # Get HTML content
             html_content = await page.content()
             
-            await page.close()
-            return html_content.lower()
+            if page_created:
+                await page.close()
+                return html_content.lower(), None
+            
+            return html_content.lower(), page
             
         except Exception as e:
             logger.error(f"Error extracting HTML content from {url}: {e}")
-            return ""
+            if page_created and page:
+                await page.close()
+            return "", None
     
-    async def _extract_html_text(self, url: str) -> str:
+    async def _extract_html_text(self, url: str, page: Optional[Page] = None) -> Tuple[str, Optional[Page]]:
         """
         Extract text content from HTML
         
         Args:
             url: URL to extract text from
+            page: Optional existing page object
             
         Returns:
-            Extracted text content
+            Tuple of (text content, page object)
         """
+        page_created = False
         try:
-            await self._init_browser()
-            page = await self.browser.new_page()
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            if page is None:
+                await self._init_browser()
+                page = await self.browser.new_page()
+                page_created = True
+                await page.goto(url, wait_until="networkidle", timeout=30000)
             
             # Extract text content
             text_content = await page.evaluate("""
@@ -192,62 +263,17 @@ class VisualPhishingScanner:
                 }
             """)
             
-            await page.close()
-            return text_content.lower()
+            if page_created:
+                await page.close()
+                return text_content.lower(), None
+            
+            return text_content.lower(), page
             
         except Exception as e:
             logger.error(f"Error extracting HTML text from {url}: {e}")
-            return ""
-    
-    def _detect_login_form(self, html_content: str) -> bool:
-        """
-        Detect login forms in HTML content (credential harvesting indicator)
-        
-        Args:
-            html_content: HTML content to analyze
-            
-        Returns:
-            True if login form is detected
-        """
-        if not html_content:
-            return False
-        
-        html_lower = html_content.lower()
-        
-        # Check for password input fields
-        password_patterns = [
-            r'type=["\']password["\']',
-            r'<input[^>]*type=["\']password["\']',
-        ]
-        
-        for pattern in password_patterns:
-            if re.search(pattern, html_lower):
-                # Found password field, now check for login-related attributes
-                login_keywords = ['user', 'login', 'senha', 'cpf', 'email', 'username', 'usuario']
-                
-                # Check if there are input fields with login-related names/ids
-                input_pattern = r'<input[^>]*(?:name|id|placeholder)=["\']([^"\']+)["\']'
-                inputs = re.findall(input_pattern, html_lower)
-                
-                for input_attr in inputs:
-                    if any(keyword in input_attr for keyword in login_keywords):
-                        logger.info(f"Login form detected: found password field with login attribute '{input_attr}'")
-                        return True
-                
-                # Also check for form elements with login-related attributes
-                form_pattern = r'<form[^>]*(?:action|id|name|class)=["\']([^"\']+)["\']'
-                forms = re.findall(form_pattern, html_lower)
-                
-                for form_attr in forms:
-                    if any(keyword in form_attr for keyword in login_keywords):
-                        logger.info(f"Login form detected: found form with login attribute '{form_attr}'")
-                        return True
-                
-                # If password field exists, it's likely a login form
-                logger.info("Login form detected: password input field found")
-                return True
-        
-        return False
+            if page_created and page:
+                await page.close()
+            return "", None
     
     def _detect_logo(self, screenshot: np.ndarray) -> Tuple[bool, float]:
         """
@@ -483,10 +509,24 @@ class VisualPhishingScanner:
         if not url.startswith(('http://', 'https://')):
             url = f"https://{url}"
         
+        page = None
         try:
-            # Capture screenshot and save it
-            screenshot, screenshot_path = await self._capture_screenshot(url, save=True)
+            await self._init_browser()
+            page = await self.browser.new_page()
+            
+            # Set viewport size
+            await page.set_viewport_size({"width": 1920, "height": 1080})
+            
+            # Navigate to URL
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            
+            # Wait a bit for dynamic content
+            await asyncio.sleep(2)
+            
+            # Capture screenshot and save it (reuse page)
+            screenshot, screenshot_path, _ = await self._capture_screenshot(url, page=page, save=True)
             if screenshot is None:
+                await page.close()
                 return {
                     "url": url,
                     "error": "Failed to capture screenshot",
@@ -495,11 +535,15 @@ class VisualPhishingScanner:
                     "screenshot_path": None
                 }
             
-            # Extract HTML content for login form detection
-            html_content = await self._extract_html_content(url)
+            # Detect login form using Playwright locators (while page is open)
+            login_form_detected = await self._detect_login_form_playwright(page)
             
-            # Extract HTML text
-            html_text = await self._extract_html_text(url)
+            # Extract HTML text (reuse page)
+            html_text, _ = await self._extract_html_text(url, page=page)
+            
+            # Close page after all operations
+            await page.close()
+            page = None
             
             # Perform OCR
             ocr_text = self._extract_text_ocr(screenshot)
@@ -513,9 +557,6 @@ class VisualPhishingScanner:
             
             # Analyze colors
             colors_found, color_score = self._analyze_colors(screenshot)
-            
-            # Detect login form (credential harvesting)
-            login_form_detected = self._detect_login_form(html_content)
             
             # Calculate phishing score
             score_result = self._calculate_phishing_score(
@@ -542,6 +583,11 @@ class VisualPhishingScanner:
             
         except Exception as e:
             logger.error(f"Error in visual analysis for {url}: {e}")
+            if page:
+                try:
+                    await page.close()
+                except:
+                    pass
             return {
                 "url": url,
                 "error": str(e),
@@ -552,7 +598,7 @@ class VisualPhishingScanner:
     
     async def scan_domains(self, domains: List[str]) -> List[Dict[str, Any]]:
         """
-        Scan multiple domains
+        Scan multiple domains concurrently using semaphore for load control
         
         Args:
             domains: List of domain URLs
@@ -560,16 +606,39 @@ class VisualPhishingScanner:
         Returns:
             List of analysis results
         """
-        results = []
+        # Initialize browser once for all scans
+        await self._init_browser()
         
-        for domain in domains:
-            result = await self.scan_domain(domain)
-            results.append(result)
-            
-            # Small delay between scans
-            await asyncio.sleep(2)
+        # Semaphore to limit concurrent scans to 3
+        semaphore = asyncio.Semaphore(3)
         
-        # Close browser after all scans
+        async def scan_with_semaphore(domain: str) -> Dict[str, Any]:
+            """Scan a single domain with semaphore control"""
+            async with semaphore:
+                return await self.scan_domain(domain)
+        
+        # Create tasks for all domains
+        tasks = [scan_with_semaphore(domain) for domain in domains]
+        
+        # Execute all tasks concurrently (max 3 at a time)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results and handle exceptions
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Error scanning domain {domains[i]}: {result}")
+                processed_results.append({
+                    "url": domains[i],
+                    "error": str(result),
+                    "severity": "low",
+                    "score": 0,
+                    "screenshot_path": None
+                })
+            else:
+                processed_results.append(result)
+        
+        # Close browser after all scans are done
         await self._close_browser()
         
-        return results
+        return processed_results

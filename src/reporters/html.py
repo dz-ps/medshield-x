@@ -1,17 +1,18 @@
 """
 HTML Reporter for MedShield-X
-Generates professional CTI dashboard with visual evidence
+Generates professional CTI dashboard with visual evidence (Base64 embedded)
 """
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any
 import logging
+import base64
 
 logger = logging.getLogger(__name__)
 
 def generate_html_report(results: List[Dict[str, Any]], output_path: str, brand: str):
     """
-    Generate HTML CTI dashboard report
+    Generate HTML CTI dashboard report with Base64 embedded screenshots
     
     Args:
         results: List of scan results
@@ -343,7 +344,15 @@ def generate_html_report(results: List[Dict[str, Any]], output_path: str, brand:
         // Make screenshots clickable to view full size
         document.querySelectorAll('.screenshot-thumb').forEach(img => {{
             img.addEventListener('click', function() {{
-                window.open(this.src, '_blank');
+                // Create modal to view full size
+                const modal = document.createElement('div');
+                modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:9999;display:flex;align-items:center;justify-content:center;cursor:pointer;';
+                const fullImg = document.createElement('img');
+                fullImg.src = this.src;
+                fullImg.style.cssText = 'max-width:90%;max-height:90%;border-radius:8px;';
+                modal.appendChild(fullImg);
+                modal.addEventListener('click', () => modal.remove());
+                document.body.appendChild(modal);
             }});
         }});
     </script>
@@ -377,7 +386,7 @@ def _generate_sections(by_type: Dict[str, List[Dict[str, Any]]], output_path: st
     return '\n'.join(sections)
 
 def _generate_visual_phishing_section(results: List[Dict[str, Any]], output_path: str = "") -> str:
-    """Generate visual phishing section with screenshots"""
+    """Generate visual phishing section with Base64 embedded screenshots"""
     findings_html = []
     
     # Sort by score (highest first)
@@ -389,27 +398,18 @@ def _generate_visual_phishing_section(results: List[Dict[str, Any]], output_path
         score = result.get('score', 0)
         screenshot_path = result.get('screenshot_path')
         
-        # Get screenshot as base64 or path
+        # Get screenshot as Base64 (portable)
         screenshot_html = ""
         if screenshot_path and Path(screenshot_path).exists():
             try:
-                if output_path:
-                    # Calculate relative path from HTML report location
-                    html_dir = Path(output_path).parent
-                    screenshot_file = Path(screenshot_path)
-                    try:
-                        rel_path = screenshot_file.relative_to(html_dir)
-                        screenshot_html = f'<img src="{rel_path}" alt="Screenshot" class="screenshot-thumb">'
-                    except ValueError:
-                        # If not relative, use screenshots subdirectory
-                        screenshot_name = screenshot_file.name
-                        screenshot_html = f'<img src="screenshots/{screenshot_name}" alt="Screenshot" class="screenshot-thumb">'
-                else:
-                    # Fallback: use filename only
-                    screenshot_name = Path(screenshot_path).name
-                    screenshot_html = f'<img src="screenshots/{screenshot_name}" alt="Screenshot" class="screenshot-thumb">'
+                # Read image file and encode to Base64
+                with open(screenshot_path, 'rb') as img_file:
+                    img_data = img_file.read()
+                    img_base64 = base64.b64encode(img_data).decode('utf-8')
+                    screenshot_html = f'<img src="data:image/png;base64,{img_base64}" alt="Screenshot" class="screenshot-thumb">'
+                    logger.debug(f"Embedded screenshot as Base64 for {url}")
             except Exception as e:
-                logger.error(f"Error loading screenshot {screenshot_path}: {e}")
+                logger.error(f"Error encoding screenshot {screenshot_path} to Base64: {e}")
                 screenshot_html = '<div class="no-screenshot">Screenshot unavailable</div>'
         else:
             screenshot_html = '<div class="no-screenshot">No screenshot available</div>'
@@ -536,4 +536,3 @@ def _get_additional_details(result: Dict[str, Any], result_type: str) -> str:
         f'<div class="detail-row"><span class="detail-label">{label}:</span><span class="detail-value">{value}</span></div>'
         for label, value in details
     ])
-
