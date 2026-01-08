@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  tor-proxy:
+    image: dperson/torproxy:latest
+    container_name: medshield-tor-proxy
+    ports:
+      - "9050:9050"
+    environment:
+      - TOR_NewCircuitPeriod=30
+      - TOR_MaxCircuitDirtiness=600
+    restart: unless-stopped
+    networks:
+      - medshield-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: medshield-x
+    depends_on:
+      - tor-proxy
+    environment:
+      - TOR_PROXY=socks5h://tor-proxy:9050
+    volumes:
+      - ./reports:/app/reports
+      - ./assets:/app/assets
+    networks:
+      - medshield-network
+    # Remove command to run interactively, or uncomment to run automatically:
+    # command: python -m src.main scan --brand medsenior --domain medsenior.com --json /app/reports/results.json --csv /app/reports/results.csv
+    stdin_open: true
+    tty: true
+    restart: "no"
+
+networks:
+  medshield-network:
+    driver: bridge
+
