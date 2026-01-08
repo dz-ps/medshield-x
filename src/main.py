@@ -18,10 +18,12 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich import box
 
 from src.core.network import NetworkClient
+from src.core.ai import AIAnalyst
 from src.scanners.surface import SurfaceWebScanner
 from src.scanners.darkweb import DarkWebScanner
 from src.scanners.dns import DNSScanner
 from src.scanners.visual import VisualPhishingScanner
+from src.scanners.cert_transparency import CertTransparencyScanner
 from src.reporters.html import generate_html_report
 
 # Configure logging
@@ -47,6 +49,9 @@ def scan(
     output_csv: Optional[str] = typer.Option(None, "--csv", "-c", help="Output CSV file path"),
     output_html: Optional[str] = typer.Option(None, "--html", "-h", help="Output HTML report file path"),
     tor_proxy: str = typer.Option("socks5h://tor-proxy:9050", "--tor-proxy", help="Tor SOCKS5 proxy URL"),
+    cert_transparency: bool = typer.Option(True, "--ct/--no-ct", help="Enable Certificate Transparency scan"),
+    ai_analysis: bool = typer.Option(True, "--ai/--no-ai", help="Enable AI analysis (requires Ollama)"),
+    ollama_url: str = typer.Option("http://host.docker.internal:11434/api/generate", "--ollama-url", help="Ollama API URL"),
 ):
     """
     Perform comprehensive OSINT scan for brand monitoring
@@ -87,6 +92,11 @@ def scan(
                 dns_scanner = DNSScanner(domain)
                 tasks.append(("DNS", dns_scanner.scan()))
             
+            if cert_transparency and domain:
+                console.print("[cyan]🔐 Starting Certificate Transparency Scan...[/cyan]")
+                ct_scanner = CertTransparencyScanner(brand, domain, network)
+                tasks.append(("Certificate Transparency", ct_scanner.scan()))
+            
             # Run OSINT scans first
             with Progress(
                 SpinnerColumn(),
@@ -119,12 +129,20 @@ def scan(
     for scan_name, scan_results in results.items():
         all_results.extend(scan_results)
     
-    # Extract suspicious domains for visual analysis
+    # Extract suspicious domains for visual analysis (from DNS and CT scans)
     suspicious_domains = []
     if dns and domain:
         for result in results.get("DNS", []):
             if result.get('type') == 'dns_typosquatting' and result.get('threat_level') in ['high', 'medium']:
                 domain_url = result.get('suspicious_domain', '')
+                if domain_url:
+                    suspicious_domains.append(domain_url)
+    
+    # Add domains from Certificate Transparency scan
+    if cert_transparency and domain:
+        for result in results.get("Certificate Transparency", []):
+            if result.get('type') == 'cert_transparency':
+                domain_url = result.get('domain', '')
                 if domain_url:
                     suspicious_domains.append(domain_url)
     
@@ -158,10 +176,41 @@ def scan(
         export_csv(all_results, output_csv)
         console.print(f"[green]✓[/green] Results exported to CSV: {output_csv}")
     
+    # AI Analysis
+    ai_summary = None
+    if ai_analysis:
+        async def run_ai_analysis():
+            async with AIAnalyst(ollama_url=ollama_url) as ai:
+                # Count severities
+                severity_counts = {}
+                for result in all_results:
+                    severity = result.get('severity', 'unknown')
+                    severity_counts[severity] = severity_counts.get(severity, 0) + 1
+                
+                # Generate executive summary
+                summary = await ai.generate_summary(
+                    total_findings=len(all_results),
+                    critical_count=severity_counts.get('critical', 0),
+                    high_count=severity_counts.get('high', 0),
+                    brand=brand
+                )
+                return summary
+        
+        with console.status("[bold green]Running AI analysis..."):
+            try:
+                ai_summary = asyncio.run(run_ai_analysis())
+                if ai_summary:
+                    console.print(f"[green]✓[/green] AI analysis completed")
+                else:
+                    console.print(f"[yellow]⚠[/yellow] AI analysis unavailable (Ollama not accessible)")
+            except Exception as e:
+                logger.error(f"AI analysis failed: {e}")
+                console.print(f"[yellow]⚠[/yellow] AI analysis failed: {e}")
+    
     # Generate HTML report
     if output_html:
         try:
-            generate_html_report(all_results, output_html, brand)
+            generate_html_report(all_results, output_html, brand, ai_summary=ai_summary)
             console.print(f"[green]✓[/green] HTML report generated: {output_html}")
         except Exception as e:
             logger.error(f"Failed to generate HTML report: {e}")
@@ -276,6 +325,21 @@ def display_results(results: list, brand: str):
                     result.get('post_title', 'N/A')[:40],
                     result.get('url', 'N/A')[:50],
                     result.get('discovered', 'N/A')
+                )
+        
+        elif result_type == 'cert_transparency':
+            table.add_column("Domain", style="red", no_wrap=False)
+            table.add_column("Source", style="cyan")
+            table.add_column("Severity", justify="center")
+            
+            for result in type_results:
+                severity = result.get('severity', 'high')
+                severity_color = 'red' if severity == 'high' else 'yellow'
+                
+                table.add_row(
+                    result.get('domain', 'N/A'),
+                    result.get('source', 'N/A'),
+                    f"[{severity_color}]{severity}[/{severity_color}]"
                 )
         
         elif result_type == 'visual_phishing':

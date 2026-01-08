@@ -27,6 +27,8 @@ services:
       - ./assets:/app/assets
     networks:
       - medshield-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Remove command to run interactively, or uncomment to run automatically:
     # command: python -m src.main scan --brand medsenior --domain medsenior.com --json /app/reports/results.json --csv /app/reports/results.csv
     stdin_open: true

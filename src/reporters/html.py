@@ -4,13 +4,13 @@ Generates professional CTI dashboard with visual evidence (Base64 embedded)
 """
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 import base64
 
 logger = logging.getLogger(__name__)
 
-def generate_html_report(results: List[Dict[str, Any]], output_path: str, brand: str):
+def generate_html_report(results: List[Dict[str, Any]], output_path: str, brand: str, ai_summary: Optional[str] = None):
     """
     Generate HTML CTI dashboard report with Base64 embedded screenshots
     
@@ -18,6 +18,7 @@ def generate_html_report(results: List[Dict[str, Any]], output_path: str, brand:
         results: List of scan results
         output_path: Path to save HTML report
         brand: Brand name being monitored
+        ai_summary: Optional AI-generated executive summary
     """
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -296,6 +297,39 @@ def generate_html_report(results: List[Dict[str, Any]], output_path: str, brand:
             font-style: italic;
         }}
         
+        .ai-section {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }}
+        
+        .ai-section h2 {{
+            color: white;
+            font-size: 1.5em;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        
+        .ai-summary {{
+            background: rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 6px;
+            line-height: 1.8;
+            font-size: 1.05em;
+        }}
+        
+        .ai-unavailable {{
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 6px;
+            font-style: italic;
+            opacity: 0.9;
+        }}
+        
         @media (max-width: 768px) {{
             .finding-content {{
                 grid-template-columns: 1fr;
@@ -337,6 +371,8 @@ def generate_html_report(results: List[Dict[str, Any]], output_path: str, brand:
             </div>
         </div>
         
+        {_generate_ai_section(ai_summary)}
+        
         {_generate_sections(by_type, output_path)}
     </div>
     
@@ -361,6 +397,27 @@ def generate_html_report(results: List[Dict[str, Any]], output_path: str, brand:
     
     output_file.write_text(html_content, encoding='utf-8')
     logger.info(f"HTML report generated: {output_file}")
+
+def _generate_ai_section(ai_summary: Optional[str]) -> str:
+    """Generate AI Threat Analysis section"""
+    if ai_summary:
+        return f"""
+        <div class="ai-section">
+            <h2>🤖 AI Threat Analysis</h2>
+            <div class="ai-summary">
+                {ai_summary}
+            </div>
+        </div>
+        """
+    else:
+        return """
+        <div class="ai-section">
+            <h2>🤖 AI Threat Analysis</h2>
+            <div class="ai-unavailable">
+                AI Analysis Unavailable - Ollama service not accessible. Manual review recommended.
+            </div>
+        </div>
+        """
 
 def _generate_sections(by_type: Dict[str, List[Dict[str, Any]]], output_path: str) -> str:
     """Generate HTML sections for each result type"""
@@ -473,8 +530,13 @@ def _generate_findings_list(results: List[Dict[str, Any]], result_type: str) -> 
     
     for result in results:
         severity = result.get('severity', 'low')
-        title = result.get('title', result.get('url', 'N/A'))
-        url = result.get('url', result.get('href', 'N/A'))
+        # Handle different result types
+        if result_type == 'cert_transparency':
+            title = result.get('domain', 'N/A')
+            url = f"https://{result.get('domain', '')}" if result.get('domain') else 'N/A'
+        else:
+            title = result.get('title', result.get('url', 'N/A'))
+            url = result.get('url', result.get('href', 'N/A'))
         
         finding_html = f"""
         <div class="finding-card {severity}">
@@ -531,6 +593,14 @@ def _get_additional_details(result: Dict[str, Any], result_type: str) -> str:
         discovered = result.get('discovered', '')
         if discovered:
             details.append(('Discovered', discovered))
+    
+    elif result_type == 'cert_transparency':
+        source = result.get('source', '')
+        if source:
+            details.append(('Source', source))
+        description = result.get('description', '')
+        if description:
+            details.append(('Description', description[:200]))
     
     return '\n'.join([
         f'<div class="detail-row"><span class="detail-label">{label}:</span><span class="detail-value">{value}</span></div>'
