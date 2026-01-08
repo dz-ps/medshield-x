@@ -22,6 +22,7 @@ from src.scanners.surface import SurfaceWebScanner
 from src.scanners.darkweb import DarkWebScanner
 from src.scanners.dns import DNSScanner
 from src.scanners.visual import VisualPhishingScanner
+from src.reporters.html import generate_html_report
 
 # Configure logging
 logging.basicConfig(
@@ -44,6 +45,7 @@ def scan(
     logo_path: str = typer.Option("/app/assets/logo.png", "--logo", help="Path to brand logo image"),
     output_json: Optional[str] = typer.Option(None, "--json", "-j", help="Output JSON file path"),
     output_csv: Optional[str] = typer.Option(None, "--csv", "-c", help="Output CSV file path"),
+    output_html: Optional[str] = typer.Option(None, "--html", "-h", help="Output HTML report file path"),
     tor_proxy: str = typer.Option("socks5h://tor-proxy:9050", "--tor-proxy", help="Tor SOCKS5 proxy URL"),
 ):
     """
@@ -58,6 +60,12 @@ def scan(
     ))
     
     all_results = []
+    
+    # Ensure reports and screenshots directories exist
+    reports_dir = Path("/app/reports")
+    screenshots_dir = reports_dir / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Screenshots directory ready: {screenshots_dir}")
     
     async def run_scans():
         """Run all enabled scans"""
@@ -123,7 +131,10 @@ def scan(
     # Run Visual Phishing Scanner on suspicious domains
     if visual and suspicious_domains:
         async def run_visual_scan():
-            visual_scanner = VisualPhishingScanner(logo_path=logo_path)
+            visual_scanner = VisualPhishingScanner(
+                logo_path=logo_path,
+                screenshots_dir=str(screenshots_dir)
+            )
             return await visual_scanner.scan_domains(suspicious_domains)
         
         with console.status("[bold green]Running visual analysis..."):
@@ -146,6 +157,15 @@ def scan(
     if output_csv:
         export_csv(all_results, output_csv)
         console.print(f"[green]✓[/green] Results exported to CSV: {output_csv}")
+    
+    # Generate HTML report
+    if output_html:
+        try:
+            generate_html_report(all_results, output_html, brand)
+            console.print(f"[green]✓[/green] HTML report generated: {output_html}")
+        except Exception as e:
+            logger.error(f"Failed to generate HTML report: {e}")
+            console.print(f"[red]✗[/red] HTML report generation failed: {e}")
     
     # Summary
     console.print("\n" + "="*60)
